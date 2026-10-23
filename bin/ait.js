@@ -17,6 +17,7 @@ import { runHookFromStdin } from '../src/hook.js';
 import { run as runDashboard } from '../src/dashboard.js';
 import { serve } from '../src/serve.js';
 import { audit } from '../src/audit.js';
+import { suggestFixes, applyFix } from '../src/doctor-fix.js';
 
 const cfg = getConfig();
 const SELF = fileURLToPath(import.meta.url);
@@ -25,13 +26,14 @@ function parseArgs(argv) {
   const dd = argv.indexOf('--');
   const main = dd >= 0 ? argv.slice(0, dd) : argv;
   const rest = dd >= 0 ? argv.slice(dd + 1) : [];
-  const flags = { json: false, verbose: false, yes: false, purgeLog: false, out: null, confirm: null };
+  const flags = { json: false, verbose: false, yes: false, fix: false, purgeLog: false, out: null, confirm: null };
   const pos = [];
   for (let i = 0; i < main.length; i++) {
     const a = main[i];
     if (a === '--json') flags.json = true;
     else if (a === '--verbose') flags.verbose = true;
     else if (a === '--yes') flags.yes = true;
+    else if (a === '--fix') flags.fix = true;
     else if (a === '--purge-log') flags.purgeLog = true;
     else if (a === '--out') flags.out = main[++i] ?? null;
     else if (a === '--confirm') flags.confirm = main[++i] ?? null;
@@ -129,6 +131,20 @@ async function cmdDoctor(flags) {
   const r = report.remainingState;
   l('stored', `${r.sessions} sessions, ${r.eventFiles} event files, ${r.settingsFiles} settings files`);
   l('network', 'none: nothing is transmitted');
+
+  const fixes = suggestFixes(report, { cfg, env: process.env });
+  if (!fixes.length) { process.stdout.write('\nAll good.\n'); return; }
+  process.stdout.write('\nProblems found:\n');
+  for (const f of fixes) process.stdout.write(`  - ${f.problem}\n      fix: ${f.command}${f.argv || f.run ? '' : '  (manual)'}\n`);
+  if (!flags.fix) { process.stdout.write('\nRun `ait doctor --fix` to apply these fixes (asks before each one).\n'); return; }
+  if (!flags.yes && !process.stdin.isTTY) throw new AitError(7, 'Re-run in a terminal, or add --yes.');
+  for (const f of fixes) {
+    if (!f.argv && !f.run) { process.stdout.write(`\nSkipping (manual): ${f.command}\n`); continue; }
+    if (!flags.yes && (await ask(`\nRun: ${f.command} ? [y/N] `)) !== 'y') { process.stdout.write('Skipped.\n'); continue; }
+    const r = await applyFix(f);
+    process.stdout.write(r.ok ? 'Done.\n' : `Failed (${r.error}). Run it yourself: ${f.command}\n`);
+  }
+  process.stdout.write('\nRe-run `ait doctor` to check.\n');
 }
 
 async function cmdExport(flags) {
@@ -198,7 +214,7 @@ async function main() {
       case 'serve': await serve(); return;
       case 'hook': await runHookFromStdin(pos[0]); process.exit(0); break;
       case 'help': case '--help': case '-h':
-        process.stdout.write('ait [new <name> [dir] [-- claude args]] | ls | open | kill | rm | rename | doctor | export | purge | serve\n');
+        process.stdout.write('ait [new <name> [dir] [-- claude args]] | ls | open | kill | rm | rename | doctor [--fix] | export | purge | serve\n');
         break;
       default:
         throw new AitError(2, 'Unknown command. Run: ait help');

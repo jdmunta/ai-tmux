@@ -42,6 +42,7 @@ No npm dependencies. Everything uses Node built-ins.
 | macOS or Linux | | Windows is not supported |
 
 Check versions: `node -v`, `tmux -V`, `claude --version`.
+Or run `ait doctor`: it prints the install command for anything missing, and `ait doctor --fix` runs it for you after asking.
 
 ## 2. Install
 
@@ -98,7 +99,8 @@ ait open <name>                      switch to / attach to a session
 ait rename <old> <new>
 ait kill <name> [--yes]              stop a session (asks to confirm)
 ait rm <name>                        remove a finished (DONE) row
-ait doctor [--json]                  check your setup
+ait doctor [--fix] [--yes] [--json]  check your setup; lists a fix command for each
+                                     problem, and --fix runs them (asks first)
 ait export [--out <file>]            back up registry data (will not overwrite)
 ait purge [--confirm purge]          stop the ait tmux server, delete ait's files
 ait serve                            start the HTTP API (same as `npm start`)

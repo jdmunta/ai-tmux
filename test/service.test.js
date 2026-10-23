@@ -124,3 +124,15 @@ test('doctor reports the environment', async () => {
   assert.equal(r.stateDirModesOk, true);
   assert.equal(r.remainingState.sessions, 2);
 });
+
+test('suggestFixes proposes commands for missing tools', async () => {
+  const { suggestFixes } = await import('../src/doctor-fix.js');
+  const report = {
+    tmux: { version: 'missing', ok: false }, claude: { path: null, ok: false },
+    hooks: { settingsFlagSupported: false }, socket: { ownerOk: true }, stateDirModesOk: true, stateDir: '/x',
+  };
+  const fixes = suggestFixes(report, { platform: 'darwin', has: (n) => n === 'brew' });
+  assert.deepEqual(fixes.map((f) => f.command), ['brew install tmux', 'brew install --cask claude-code']);
+  const none = suggestFixes({ ...report, tmux: { version: '3.8', ok: true }, claude: { path: '/c', ok: true }, hooks: { settingsFlagSupported: true } }, { has: () => false });
+  assert.equal(none.length, 0);
+});
