@@ -7,6 +7,21 @@ The same operations are available as a small local HTTP API (`npm start`).
 
 No npm dependencies. Everything uses Node built-ins.
 
+## Quick use (3 steps)
+
+1. Install the requirements: Node.js 22+, tmux 3.2+ and Claude Code (macOS or Linux).
+2. Get it and check your setup:
+   ```
+   git clone https://github.com/jdmunta/ai-tmux.git
+   cd ai-tmux && npm link && ait doctor
+   ```
+3. Start a session and open the dashboard (in a real terminal window):
+   ```
+   ait new my-task ~/code/my-project
+   ait
+   ```
+   Press `Enter` to open a session, `Ctrl-b` then `Tab` to come back, `q` to quit.
+
 ## 1. Requirements
 
 | Tool | Version | Needed for |
@@ -232,4 +247,4 @@ Project layout:
 
 ## License
 
-UNLICENSED (private).
+No license has been chosen yet, so all rights are reserved by the author.
