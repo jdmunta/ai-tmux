@@ -1,0 +1,690 @@
+openapi: 3.1.0
+info:
+  title: AI tmux (ait) Local Control Contract
+  version: 1.0.0
+  summary: Contract for the ait session manager, covering the CLI and the hook-event interface.
+  description: |
+    ait has no network listener. This document describes the contract as a
+    request/response API so the Developer can implement it uniformly. Every
+    operation maps one-to-one to a CLI subcommand (see `x-cli`), and the HTTP
+    status maps to the CLI exit code (see `x-exit-code`). The same schemas
+    describe the `--json` CLI output, the internal hook-event file, and the
+    module boundaries.
+
+    Assumptions:
+    - Single user, single machine, macOS/Linux, tmux >= 3.0, Node 22.
+    - Session names match `^[a-z0-9_-]{1,24}$`; tmux target is `=ait-<name>`.
+    - `send-keys`, `paste-buffer`, `run-shell`, `pipe-pane` are never used.
+    - `claudeSessionId` and `args` are omitted from responses unless `verbose=true`.
+    - State definitions: `waiting` = blocked on a permission prompt or question;
+      `idle` = turn complete; `running` = working; `done` = process exited;
+      `unknown` = detection failed.
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Proprietary
+servers:
+  - url: http://localhost/ait
+    description: Logical local endpoint (the CLI `ait`, in-process; no network listener)
+tags:
+  - name: sessions
+    description: Launch, list, open, rename, kill and remove managed sessions
+  - name: hooks
+    description: Internal hook-event ingestion from Claude Code
+  - name: admin
+    description: Diagnostics, export and purge
+paths:
+  /sessions:
+    get:
+      tags: [sessions]
+      operationId: listSessions
+      summary: List sessions and states
+      x-cli: "ait ls [--json] [--verbose]"
+      x-exit-code: 0
+      parameters:
+        - name: verbose
+          in: query
+          description: Include `claudeSessionId` and `args`.
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Sessions sorted waiting (oldest first), running, idle, done. Empty list is normal when the tmux server is not running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionList" }
+              examples:
+                populated:
+                  value:
+                    stale: false
+                    degraded: false
+                    counts: { waiting: 1, running: 1, idle: 0, done: 0, unknown: 0 }
+                    sessions:
+                      - id: 1
+                        name: api-refactor
+                        dir: /Users/me/code/api
+                        branch: main
+                        state: waiting
+                        kind: permission
+                        since: 1760500000000
+                        source: hook
+                        degraded: false
+                        attached: false
+                        createdAt: 1760499000000
+                        exit: null
+                      - id: 2
+                        name: migrate-db
+                        dir: /Users/me/code/billing
+                        branch: feature/migrate
+                        state: running
+                        kind: null
+                        since: 1760500100000
+                        source: hook
+                        degraded: false
+                        attached: true
+                        createdAt: 1760499500000
+                        exit: null
+                empty:
+                  value:
+                    stale: false
+                    degraded: false
+                    counts: { waiting: 0, running: 0, idle: 0, done: 0, unknown: 0 }
+                    sessions: []
+        "503":
+          $ref: "#/components/responses/TmuxMissing"
+    post:
+      tags: [sessions]
+      operationId: createSession
+      summary: Launch a new Claude Code session
+      x-cli: "ait new <name> [dir] [-- <claude args>]"
+      description: |
+        Creates `tmux new-session -d -s ait-<name> -c <dir> -e AIT_SESSION=<name> -- <claudeAbs> --settings <file> ...args`
+        on the `ait` socket, then sets `remain-on-exit on`. Must appear in listings within 2 s.
+        Launching in a directory with project-level hooks requires `confirmProjectHooks=true`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewSessionRequest" }
+            examples:
+              basic:
+                value: { name: api-refactor, dir: "~/code/api" }
+              withArgs:
+                value: { name: fix-tests, dir: "~/code/web", args: ["--model", "sonnet"] }
+      responses:
+        "201":
+          description: Session started.
+          x-exit-code: 0
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+              example:
+                id: 3
+                name: api-refactor
+                dir: /Users/me/code/api
+                branch: main
+                state: running
+                kind: null
+                since: 1760500200000
+                source: hook
+                degraded: false
+                attached: false
+                createdAt: 1760500200000
+                exit: null
+        "400":
+          description: Invalid name (exit 2).
+          x-exit-code: 2
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: 2, message: "Use letters, numbers, - and _ only." }
+        "409":
+          description: Name already taken (exit 3).
+          x-exit-code: 3
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: 3, message: "A session called api-refactor already exists. Pick another name." }
+        "422":
+          description: Directory missing (exit 4) or path is a file (exit 5).
+          x-exit-code: [4, 5]
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                missing:
+                  value: { error: 4, message: "That folder doesn't exist. Check the path." }
+                notFolder:
+                  value: { error: 5, message: "That path is a file, not a folder." }
+        "424":
+          description: `claude` not found, or resolves to an unsafe location (exit 6).
+          x-exit-code: 6
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: 6, message: "Couldn't start Claude Code: `claude` isn't on your PATH." }
+        "428":
+          description: Target directory contains project-level hooks and confirmation was not given.
+          x-exit-code: 7
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: 7, message: "This folder has project hooks that will run with your permissions. Confirm to continue." }
+        "502":
+          $ref: "#/components/responses/TmuxError"
+        "503":
+          $ref: "#/components/responses/TmuxMissing"
+  /sessions/{name}:
+    parameters:
+      - $ref: "#/components/parameters/SessionName"
+    get:
+      tags: [sessions]
+      operationId: getSession
+      summary: Get one session
+      x-cli: "ait ls --json (filtered)"
+      parameters:
+        - name: verbose
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: The session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [sessions]
+      operationId: renameSession
+      summary: Rename a session
+      x-cli: "ait rename <name> <new-name>"
+      description: Updates the registry, event file, settings file and tmux session consistently.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RenameRequest" }
+            example: { name: api-v2 }
+      responses:
+        "200":
+          description: Renamed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "400":
+          description: Invalid new name (exit 2).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: 2, message: "Use letters, numbers, - and _ only." }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: New name already taken (exit 3).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: 3, message: "A session called api-v2 already exists. Pick another name." }
+    delete:
+      tags: [sessions]
+      operationId: killSession
+      summary: Kill a session and remove its entry
+      x-cli: "ait kill <name>"
+      description: |
+        Sends SIGHUP to Claude via `kill-session` on `=ait-<name>`. Files being edited may be
+        partly changed. Requires `confirm=true`; the dashboard defaults to "keep". The audit log keeps
+        a minimal record unless `purgeLog=true`.
+      parameters:
+        - name: confirm
+          in: query
+          required: true
+          schema: { type: boolean }
+        - name: purgeLog
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Killed.
+          x-exit-code: 0
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActionResult" }
+              example: { ok: true, message: "Killed api-refactor." }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "428":
+          description: Confirmation missing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: 7, message: "Kill api-refactor? This stops Claude immediately; files it was editing may be partly changed." }
+        "502":
+          $ref: "#/components/responses/TmuxError"
+  /sessions/{name}/open:
+    parameters:
+      - $ref: "#/components/parameters/SessionName"
+    post:
+      tags: [sessions]
+      operationId: openSession
+      summary: Switch to or attach to a session
+      x-cli: "ait open <name>"
+      description: Uses `switch-client` when already inside tmux, otherwise `attach-session`. Never nests.
+      responses:
+        "200":
+          description: Client switched or attached.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActionResult" }
+              example: { ok: true, message: "Opened api-refactor." }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/TmuxError"
+  /sessions/{name}/entry:
+    parameters:
+      - $ref: "#/components/parameters/SessionName"
+    delete:
+      tags: [sessions]
+      operationId: removeDoneSession
+      summary: Remove a DONE entry from the registry
+      x-cli: "ait rm <name>"
+      description: Deletes the registry entry, event file and settings file. Only valid when state is `done`.
+      parameters:
+        - name: purgeLog
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActionResult" }
+              example: { ok: true, message: "Removed old-spike." }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Session is not done; use kill.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: 7, message: "migrate-db is still running. Use kill to stop it." }
+  /dashboard:
+    post:
+      tags: [sessions]
+      operationId: startDashboard
+      summary: Start or attach to the dashboard
+      x-cli: "ait"
+      description: Opens the session `ait-dash` on the ait socket; if `dashboard.lock` is held by a live ait process, attaches to it instead.
+      responses:
+        "200":
+          description: Dashboard running or attached.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActionResult" }
+        "503":
+          $ref: "#/components/responses/TmuxMissing"
+  /hooks/{event}:
+    post:
+      tags: [hooks]
+      operationId: ingestHook
+      summary: Ingest a Claude Code hook event (internal)
+      x-cli: "ait hook <event>"
+      description: |
+        Invoked by Claude hooks with the JSON payload on stdin and `AIT_SESSION` in the environment.
+        Always succeeds (exit 0) and never blocks Claude. Stdin is capped at 64 KiB; only whitelisted
+        fields are stored. Invalid session names and traversal attempts are silently dropped and logged
+        to `hook-errors.log`. Events for sessions not in the registry, with `ts` before `createdAt`
+        or more than 5 s in the future, are discarded by the dashboard.
+      parameters:
+        - name: event
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/HookEventName" }
+        - name: AIT_SESSION
+          in: header
+          required: true
+          description: Models the `AIT_SESSION` environment variable.
+          schema: { type: string, pattern: "^[a-z0-9_-]{1,24}$" }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HookPayload" }
+            examples:
+              permission:
+                value: { session_id: "c1f2-aa", message: "Claude needs your permission to use Bash", notification_type: permission }
+              stop:
+                value: { session_id: "c1f2-aa" }
+      responses:
+        "200":
+          description: Accepted or dropped; always returned.
+          x-exit-code: 0
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HookResult" }
+              example: { accepted: true }
+  /doctor:
+    get:
+      tags: [admin]
+      operationId: doctor
+      summary: Check the environment
+      x-cli: "ait doctor"
+      description: Checks tmux version, claude path, hook support, prefix, bell, notification command, socket ownership and stored-state inventory.
+      responses:
+        "200":
+          description: Report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DoctorReport" }
+              example:
+                tmux: { version: "3.4", ok: true }
+                claude: { path: /usr/local/bin/claude, ok: true, worldWritable: false }
+                hooks: { settingsFlagSupported: true, notificationKindsDistinguished: true }
+                prefix: C-b
+                returnKey: Tab
+                returnKeyCollision: false
+                socket: { name: ait, ownerOk: true }
+                notifier: osascript
+                stateDir: /Users/me/.local/state/ait
+                stateDirModesOk: true
+                remainingState: { sessions: 2, eventFiles: 2, settingsFiles: 2 }
+  /export:
+    get:
+      tags: [admin]
+      operationId: exportState
+      summary: Export registry, audit log and settings metadata
+      x-cli: "ait export [--out file]"
+      description: Includes `claudeSessionId` and `args`. When written to a file, mode is 0600.
+      responses:
+        "200":
+          description: Export document.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExportDocument" }
+  /purge:
+    post:
+      tags: [admin]
+      operationId: purgeState
+      summary: Erase all ait state and stop the ait tmux server
+      x-cli: "ait purge"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PurgeRequest" }
+            example: { confirm: purge }
+      responses:
+        "200":
+          description: Purged; lists what was deleted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PurgeResult" }
+              example: { deleted: ["registry.json", "events/", "settings/", "audit.log"], serverStopped: true }
+        "428":
+          description: Typed confirmation missing or wrong.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: 7, message: "Type purge to confirm." }
+components:
+  parameters:
+    SessionName:
+      name: name
+      in: path
+      required: true
+      description: Session name; tmux target is `=ait-<name>`.
+      schema: { type: string, pattern: "^[a-z0-9_-]{1,24}$" }
+  responses:
+    NotFound:
+      description: Session not found (exit 8). Also used when a session vanished externally.
+      x-exit-code: 8
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: 8, message: "migrate-db is no longer running." }
+    TmuxError:
+      description: tmux command failed or timed out after 2 s (exit 7).
+      x-exit-code: 7
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: 7, message: "Can't reach tmux. Sessions may still be running. Retrying…" }
+    TmuxMissing:
+      description: tmux is missing or older than 3.0 (exit 10).
+      x-exit-code: 10
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: 10, message: "AI tmux needs tmux. Install it with `brew install tmux` or your package manager." }
+  schemas:
+    Error:
+      type: object
+      description: Error body; identical to the `--json` CLI error output.
+      required: [error, message]
+      properties:
+        error:
+          type: integer
+          description: CLI exit code (2 invalid name, 3 name taken, 4 dir missing, 5 dir not folder, 6 claude not found, 7 tmux/other error, 8 not found, 10 tmux missing/too old).
+          enum: [2, 3, 4, 5, 6, 7, 8, 10]
+        message:
+          type: string
+          description: Fixed microcopy; never contains stack traces, paths beyond user input, or environment values.
+      additionalProperties: false
+    SessionState:
+      type: string
+      enum: [running, waiting, idle, done, unknown]
+    WaitKind:
+      type:
+        - string
+        - "null"
+      enum: [permission, question, idle, null]
+    ExitInfo:
+      type: object
+      required: [code, at]
+      properties:
+        code: { type: integer }
+        at: { type: integer, format: int64, description: Epoch ms }
+      additionalProperties: false
+    Session:
+      type: object
+      required: [id, name, dir, state, since, source, degraded, attached, createdAt]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          description: Stable creation-order number; never reused. Digits 1-9 are hotkeys.
+        name: { type: string, pattern: "^[a-z0-9_-]{1,24}$" }
+        dir: { type: string, description: Absolute path, `~` expanded. Not unique across sessions. }
+        branch: { type: [string, "null"], description: Git branch/worktree, display only. }
+        state: { $ref: "#/components/schemas/SessionState" }
+        kind: { $ref: "#/components/schemas/WaitKind" }
+        since: { type: integer, format: int64, description: Epoch ms of entering current state; clamped >= 0 on display. }
+        source: { type: string, enum: [hook, fallback] }
+        degraded: { type: boolean, description: True when state comes from pane-capture fallback. }
+        attached: { type: boolean, description: A client currently displays this session. }
+        createdAt: { type: integer, format: int64 }
+        exit:
+          oneOf:
+            - $ref: "#/components/schemas/ExitInfo"
+            - type: "null"
+        args:
+          type: array
+          items: { type: string }
+          description: Only returned when `verbose=true`.
+        claudeSessionId:
+          type: [string, "null"]
+          description: Only returned when `verbose=true`.
+      additionalProperties: false
+    SessionList:
+      type: object
+      required: [stale, degraded, counts, sessions]
+      properties:
+        stale: { type: boolean, description: tmux unreachable; data is last known. }
+        degraded: { type: boolean, description: At least one session uses fallback detection. }
+        counts:
+          type: object
+          required: [waiting, running, idle, done, unknown]
+          properties:
+            waiting: { type: integer, minimum: 0 }
+            running: { type: integer, minimum: 0 }
+            idle: { type: integer, minimum: 0 }
+            done: { type: integer, minimum: 0 }
+            unknown: { type: integer, minimum: 0 }
+        sessions:
+          type: array
+          items: { $ref: "#/components/schemas/Session" }
+    NewSessionRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9_-]{1,24}$" }
+        dir:
+          type: string
+          description: Defaults to the caller's cwd. `~` is expanded; must be an existing directory.
+        args:
+          type: array
+          items: { type: string, maxLength: 256 }
+          maxItems: 32
+          description: Extra claude args, passed after `--` as separate argv entries.
+        confirmProjectHooks: { type: boolean, default: false }
+      additionalProperties: false
+    RenameRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9_-]{1,24}$" }
+      additionalProperties: false
+    ActionResult:
+      type: object
+      required: [ok, message]
+      properties:
+        ok: { type: boolean }
+        message: { type: string }
+    HookEventName:
+      type: string
+      enum: [SessionStart, UserPromptSubmit, Notification, Stop]
+    HookPayload:
+      type: object
+      description: Claude hook JSON on stdin. Unknown fields are ignored; only whitelisted fields are stored.
+      properties:
+        session_id: { type: string, maxLength: 128 }
+        message: { type: string, maxLength: 1024 }
+        notification_type: { type: string, maxLength: 64 }
+      additionalProperties: true
+    HookResult:
+      type: object
+      required: [accepted]
+      properties:
+        accepted: { type: boolean }
+    EventFile:
+      type: object
+      description: Contents of `events/<name>.json`, 0600, written atomically via rename.
+      required: [session, event, kind, ts, claudeSessionId]
+      properties:
+        session: { type: string, pattern: "^[a-z0-9_-]{1,24}$" }
+        event: { $ref: "#/components/schemas/HookEventName" }
+        kind: { $ref: "#/components/schemas/WaitKind" }
+        ts: { type: integer, format: int64 }
+        claudeSessionId: { type: [string, "null"] }
+      additionalProperties: false
+    RegistryEntry:
+      type: object
+      required: [id, name, dir, args, createdAt]
+      properties:
+        id: { type: integer, minimum: 1 }
+        name: { type: string, pattern: "^[a-z0-9_-]{1,24}$" }
+        dir: { type: string }
+        branch: { type: [string, "null"] }
+        args: { type: array, items: { type: string } }
+        createdAt: { type: integer, format: int64 }
+        claudeSessionId: { type: [string, "null"] }
+        exit:
+          oneOf:
+            - $ref: "#/components/schemas/ExitInfo"
+            - type: "null"
+    Registry:
+      type: object
+      description: Contents of `registry.json` (max 1 MiB).
+      required: [version, nextId, sessions]
+      properties:
+        version: { type: integer, const: 1 }
+        nextId: { type: integer, minimum: 1 }
+        sessions:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/RegistryEntry" }
+    DoctorReport:
+      type: object
+      required: [tmux, claude, hooks, prefix, socket, stateDir, stateDirModesOk, remainingState]
+      properties:
+        tmux:
+          type: object
+          required: [version, ok]
+          properties:
+            version: { type: string }
+            ok: { type: boolean }
+        claude:
+          type: object
+          required: [path, ok]
+          properties:
+            path: { type: [string, "null"] }
+            ok: { type: boolean }
+            worldWritable: { type: boolean }
+        hooks:
+          type: object
+          properties:
+            settingsFlagSupported: { type: boolean }
+            notificationKindsDistinguished: { type: boolean }
+        prefix: { type: string, description: Derived from `tmux show -g prefix`. }
+        returnKey: { type: string }
+        returnKeyCollision: { type: boolean }
+        socket:
+          type: object
+          properties:
+            name: { type: string }
+            ownerOk: { type: boolean }
+        notifier: { type: string, enum: [osascript, terminal-notifier, notify-send, bell-only] }
+        stateDir: { type: string }
+        stateDirModesOk: { type: boolean }
+        remainingState:
+          type: object
+          properties:
+            sessions: { type: integer }
+            eventFiles: { type: integer }
+            settingsFiles: { type: integer }
+    ExportDocument:
+      type: object
+      required: [exportedAt, registry, audit]
+      properties:
+        exportedAt: { type: integer, format: int64 }
+        registry: { $ref: "#/components/schemas/Registry" }
+        audit:
+          type: array
+          items:
+            type: object
+            required: [ts, action, session, result]
+            properties:
+              ts: { type: integer, format: int64 }
+              action: { type: string, enum: [new, kill, rm, open, rename] }
+              session: { type: string }
+              id: { type: integer }
+              result: { type: string, enum: [ok, error] }
+        settingsMetadata:
+          type: array
+          items:
+            type: object
+            properties:
+              session: { type: string }
+              hash: { type: string }
+    PurgeRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: string, const: purge }
+      additionalProperties: false
+    PurgeResult:
+      type: object
+      required: [deleted, serverStopped]
+      properties:
+        deleted:
+          type: array
+          items: { type: string }
+        serverStopped: { type: boolean }

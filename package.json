@@ -1,0 +1,15 @@
+{
+  "name": "ait",
+  "version": "1.2.1",
+  "description": "AI tmux: a terminal dashboard and local control API for parallel Claude Code sessions, built on tmux",
+  "type": "module",
+  "bin": { "ait": "bin/ait.js" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node bin/serve.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {},
+  "license": "UNLICENSED",
+  "private": true
+}
