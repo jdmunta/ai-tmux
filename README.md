@@ -9,7 +9,17 @@ No npm dependencies. Everything uses Node built-ins.
 
 ## Quick use (3 steps)
 
-1. Install the requirements: Node.js 22+, tmux 3.2+ and Claude Code (macOS or Linux).
+1. Install the prerequisites (macOS or Linux):
+   ```
+   # Node.js 22+ and tmux 3.2+
+   brew install node tmux                 # macOS (Homebrew)
+   sudo apt install tmux                  # Debian/Ubuntu (install Node 22+ from nodejs.org or nvm)
+
+   # Claude Code, then sign in once by running `claude`
+   npm install -g @anthropic-ai/claude-code    # or: brew install --cask claude-code
+   claude
+   ```
+   Check them with `node -v`, `tmux -V` and `claude --version`.
 2. Get it and check your setup:
    ```
    git clone https://github.com/jdmunta/ai-tmux.git
